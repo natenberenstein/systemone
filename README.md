@@ -1,59 +1,76 @@
-# Laya + LangGraph Support Ops Lab
+# System One Lab: Laya + LangGraph coding-agent demo
 
-A runnable application for showing how a small decision model fits into an agent workflow. Laya classifies a queue of support reports into `billing`, `technical`, or `other`. LangGraph applies a chosen probability cutoff and dispatches each report. Only an uncertain report gets an OpenAI second judgment. A technical report then goes to a LangChain agent with a `search_knowledge_base` tool. The app displays the route, probabilities, tool calls, and source topics.
+This application shows a bounded System-1 decision inside a coding-agent workflow. Laya classifies CI failures as `code_bug`, `environment`, `test_flake`, or `unknown`. LangGraph applies an exploratory fallback policy and dispatches the result. For a reproducible code failure, a LangChain/OpenAI agent reads a small fixture repository, runs the specific failing test, and proposes a fix. The tools are read-only; the agent does not modify the fixture.
 
-The batch screen uses 14 synthetic, labeled reports, including negations and out-of-scope requests. It shows wrong predictions rather than hiding them. The workflow screen follows one report into the agent. No customer message is sent and no account action is taken.
+The Streamlit app also compares **Laya**, **Laya plus OpenAI fallback**, **OpenAI-only**, and **simple keyword rules** on the same eight cases. It shows accuracy, model calls, token usage, stage timing, and the effect of different probability cutoffs. A second button runs three complete workflows independently on one selected case, including downstream agent calls and wall time. Real LangGraph node updates are displayed as they occur. The earlier support-ticket example remains in a separate tab.
 
 ```mermaid
 flowchart LR
-  Q[Support report] --> L[Laya category + probability]
-  L -->|Below cutoff| F[OpenAI second judgment]
-  L -->|At or above cutoff| D[LangGraph dispatch]
+  CI[CI failure] --> L[Laya route + chosen probability]
+  L -->|below cutoff| F[OpenAI second judgment]
+  L -->|accepted| D[LangGraph dispatch]
   F --> D
-  D -->|Billing| B[Fixed billing policy]
-  D -->|Technical| A[OpenAI agent + knowledge-base tool]
-  D -->|Other| M[Manual queue]
+  D -->|code_bug with fixture test| A[Agent reads code + runs test]
+  D -->|environment| E[Runner checklist]
+  D -->|test_flake| T[Stability checklist]
+  D -->|unknown| U[Request evidence]
 ```
 
-## Run locally
+## Run the app
 
-With Python 3.12 (tested here):
+Python 3.12 was used for development:
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 cp .env.example .env
-# Put OPENAI_API_KEY in .env for the OpenAI branches.
+# Set OPENAI_API_KEY in .env for the OpenAI comparisons and coding agent.
 .venv/bin/streamlit run app.py
 ```
 
-Open the Streamlit URL shown in the terminal (normally <http://localhost:8501>). Click **Run Laya triage**, then pick **Duplicate charge** to show the no-OpenAI route. Pick **API error** to show a low-confidence second judgment followed by an agent tool call. **Settings crash** demonstrates a technical investigation without a second judgment. Increase or decrease the cutoff to show how the path changes; it is a demonstration knob, not a calibrated production threshold.
+The first local Laya call downloads checkpoint weights unless `HF_HOME` points to an existing cache. The app runs Laya and the rules baseline without an OpenAI key; OpenAI-only and complete three-way comparison require one. `.env` is ignored by Git. `OPENAI_MODEL` defaults to `gpt-5.6-luna` and uses the Responses API for tool calling.
 
-The first local run downloads Laya weights unless `HF_HOME` points to a cache. In the original development workspace, the cache is `/home/ncbernar/workspace/laya-eval/hf-cache`; other users can omit this setting. Without `OPENAI_API_KEY`, Laya triage and fixed routes still work; low-confidence reports go to manual review and technical reports are queued without agent investigation. Keep `.env` private; it is ignored by Git. `OPENAI_MODEL` defaults to `gpt-5.6-luna` and is configurable in `.env`. The OpenAI integration uses the Responses API so this model can call the playbook tool.
+In **Coding agent**, click **Compare triage on all 8 failures**. The first three cases summarize actual failures from `fixtures/cart_project`; the other five are synthetic CI summaries. Inspect mismatches and the cutoff sweep. Then select **Zero quantity** and click **Run Laya-guided workflow**: at the default exploratory cutoff, Laya routes it directly to the coding agent. The agent reads `cart.py` and `tests/test_cart.py`, runs the failing test, and explains the bug. **Discount regression** shows an OpenAI second judgment before the agent. **Compare complete workflows** runs all three routes on the selected case and reports their measured wall times and model/tool calls.
 
-## Use a deployed Laya endpoint
+The cutoff of 0.55 is an **in-sample demo setting**, chosen while inspecting this fixture. It is not calibrated or validated for deployment. The cutoff sweep shows accepted errors and coverage on these same eight examples only. Use separate, representative failures to select and validate any real fallback policy. Laya's `answer_confidence` is the chosen label probability; its generic `confidence` is a different entropy-based score.
 
-Set the *root* URL of a running `laya-serve` instance in `.env`:
+## Deploy the batch adapter behind ingress
 
-```dotenv
-LAYA_BASE_URL=https://laya.example.com
-LAYA_API_KEY=your-laya-bearer-token
+The stock `laya-serve` endpoint accepts one state per `POST /v1/systemone`. For remote batching, run the included resident adapter on the machine with Laya weights:
+
+```bash
+export LAYA_API_KEY='choose-a-server-secret'
+.venv/bin/uvicorn batch_server:app --host 0.0.0.0 --port 8001
 ```
 
-Restart Streamlit after changing the connection. The app calls `POST /v1/systemone` and passes `LAYA_API_KEY` as a bearer token. The current `laya-serve` protocol has no multi-state batch endpoint, so the remote mode makes one HTTP request per report; the UI labels this as **remote sequential HTTP**. Local mode uses `Router.predict_batch` and groups the reports into a Laya batch. The key and URL are read on the application server; the app never puts the key in a browser request.
+Expose port 8001 through your ingress, then set these values in the **Streamlit app's** `.env`:
 
-## Live demo plan (20–30 minutes)
+```dotenv
+LAYA_BATCH_BASE_URL=https://your-laya-batch-host.example
+LAYA_API_KEY=the-same-server-secret
+```
 
-1. **Problem (3 min):** Show 14 reports and the fixed three-label decision. Explain why only short, bounded classification goes to Laya.
-2. **Batch (5 min):** Run triage, inspect chosen-label probability, errors, cutoff coverage, and local versus remote call count. Show the two mismatches.
-3. **Handoff (8 min):** Run Duplicate charge, API error, and Settings crash. Compare decision traces and playbook tool calls.
-4. **Implementation (5 min):** Walk through `demo/laya_gateway.py`, `demo/workflow.py`, and `demo/openai_agent.py`. The graph makes the fallback and agent call explicit.
-5. **Discussion (4 min):** Change the cutoff, discuss a held-out evaluation and the endpoint's lack of batch support. Compare complete workflow latency and correctness before making cost or performance claims.
+Restart Streamlit. The app sends one authenticated `POST /v1/batch` containing up to 64 short reports; the server keeps one local `Router` resident and calls `Router.predict_batch`. `GET /health` and `POST /v1/batch` both require the bearer token when `LAYA_API_KEY` is set. Keep TLS and access controls at ingress. The adapter accepts 1–4000 characters per report and 2–8 choice labels. It is intentionally a small demonstration service, not a general public inference API.
 
-## Verification and limits
+If you have only stock `laya-serve`, set `LAYA_BASE_URL` instead. That path is supported, but the app sends one HTTP request per report and labels it **remote sequential HTTP**. `LAYA_BATCH_BASE_URL` takes precedence when both are set. The app's keys stay server-side.
 
-Run `.venv/bin/python smoke.py` for the real Laya batch, and `.venv/bin/python -m pytest -q` for the gateway and graph behavior. In the development workspace on CPU, one 14-report local batch with a cold checkpoint took **12.64 seconds**, and Laya matched **12/14** synthetic reference labels. These are observations from one small fixture, not a model benchmark. One live workflow run used **zero** OpenAI stages for a confident billing report; an API error used a second judgment and then one knowledge-base tool call. The agent itself may make multiple model API requests in a stage.
+## What was measured here
 
-The current label probability is not a guarantee of correctness. Laya's `answer_confidence` is the chosen label probability; its generic `confidence` is a different entropy-based measure. The sample labels, cutoff, and tiny knowledge base should be replaced with domain data, held-out evaluation, and real playbooks before production use. The app intentionally records no customer content and does not connect to a ticket system.
+On one CPU run of the eight coding summaries, Laya matched **5/8**, the rules matched **7/8**, OpenAI-only matched **8/8**, and Laya plus fallback matched **8/8** with five OpenAI classification calls instead of eight. Laya's local batch took about **15 seconds** with checkpoint loading; the summed classification-stage times were about **21.7 seconds** for Laya plus fallback and **11.1 seconds** for OpenAI-only. The hybrid saved three classification calls on this set but was slower on this CPU. These are one-run observations, not a general benchmark.
 
-Primary references: [Laya source](https://github.com/NandhaKishorM/laya), [LangGraph workflow guide](https://docs.langchain.com/oss/python/langgraph/quickstart), [LangChain agents](https://docs.langchain.com/oss/python/langchain/agents), [LangChain OpenAI integration](https://docs.langchain.com/oss/python/integrations/chat/openai), [OpenAI API quickstart](https://developers.openai.com/api/docs/quickstart).
+For the **Zero quantity** case, three independently executed complete workflows all found the code bug. One run took about **9.5 seconds** with Laya (two OpenAI model calls in the downstream agent), **6.4 seconds** with OpenAI-only (three calls including classification), and **6.2 seconds** with rules (three agent calls). Agent token counts differ between runs because responses are generated independently. The batch comparison reuses the OpenAI-only classifications as fallback results to avoid paying twice; its displayed stage-time sum is **not** an independently measured end-to-end wall time. The complete-workflow comparison is measured independently.
+
+The fixture is small and partially synthetic. Its rules baseline is strong, and the CPU Laya path did not win on latency. That is the useful lesson for a demo: decide whether a System-1 route earns a place using representative data and complete workflow measurements, rather than assuming it will. Laya's own [evaluation guide](https://github.com/NandhaKishorM/laya/blob/main/docs/evals.md) and [documented limits](https://github.com/NandhaKishorM/laya/blob/main/README.md#honest-limits) give more context.
+
+## Verify
+
+```bash
+.venv/bin/python -m pytest -q
+cd fixtures/cart_project && ../../.venv/bin/python -m pytest tests/test_cart.py -q
+```
+
+The root tests should pass. The cart fixture should report three intentional failures and one pass. To run Laya without OpenAI, use `.venv/bin/python smoke.py` for the support example or the app's coding comparison without a key. The batch adapter has an authenticated FastAPI test and was also exercised over a live HTTP server with two reports in one request.
+
+For a 20–30 minute talk: show the real fixture failure (3 minutes), batch comparison and cutoff sweep (7 minutes), streamed coding-agent investigation (7 minutes), full workflow comparison (5 minutes), and the remote batch request plus limitations (3 minutes). The implementation seams are `demo/coding_data.py` (finite decision), `demo/coding_workflow.py` (routing and baselines), `demo/coding_agent.py` (restricted tools), and `batch_server.py` (remote batch transport).
+
+Primary implementation references: [Laya](https://github.com/NandhaKishorM/laya), [LangGraph streaming](https://docs.langchain.com/oss/python/langgraph/streaming), [LangChain agents](https://docs.langchain.com/oss/python/langchain/agents), [LangChain OpenAI integration](https://docs.langchain.com/oss/python/integrations/chat/openai).

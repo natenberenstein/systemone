@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import os
+from threading import Lock
 from time import perf_counter
 from typing import Protocol
 
@@ -17,10 +18,10 @@ class Decision:
     probabilities: dict[str, float]
 
     @classmethod
-    def from_response(cls, response: dict) -> "Decision":
-        answer = response["answers"]["queue"]
+    def from_response(cls, response: dict, question: dict = QUESTION, question_key: str = "queue") -> "Decision":
+        answer = response["answers"][question_key]
         choice = answer["choice"]
-        if choice not in QUESTION["criteria"]:
+        if choice not in question["criteria"]:
             raise ValueError(f"Unexpected Laya category: {choice!r}")
         probabilities = answer.get("probabilities", {})
         # answer_confidence is the chosen label's probability. Laya's generic
@@ -40,7 +41,7 @@ class BatchResult:
 
 
 class LayaGateway(Protocol):
-    def predict_batch(self, reports: list[str]) -> BatchResult: ...
+    def predict_batch(self, reports: list[str], question: dict = QUESTION, question_key: str = "queue") -> BatchResult: ...
 
 
 class LocalLayaGateway:
@@ -52,18 +53,20 @@ class LocalLayaGateway:
         from laya.router import Router
 
         self.router = Router(device=device, default="english", preload=False)
+        self._predict_lock = Lock()
 
-    def predict_batch(self, reports: list[str]) -> BatchResult:
+    def predict_batch(self, reports: list[str], question: dict = QUESTION, question_key: str = "queue") -> BatchResult:
         if not reports:
             return BatchResult([], 0, "local batched inference", 0)
         requests = [
-            {"state": {"report": report}, "questions": {"queue": QUESTION}, "model": "english"}
+            {"state": {"report": report}, "questions": {question_key: question}, "model": "english"}
             for report in reports
         ]
         start = perf_counter()
-        responses = self.router.predict_batch(requests)
+        with self._predict_lock:
+            responses = self.router.predict_batch(requests)
         return BatchResult(
-            [Decision.from_response(response) for response in responses],
+            [Decision.from_response(response, question, question_key) for response in responses],
             perf_counter() - start,
             "local batched inference",
             1,
@@ -80,20 +83,46 @@ class RemoteLayaGateway:
             headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
         )
 
-    def predict_batch(self, reports: list[str]) -> BatchResult:
+    def predict_batch(self, reports: list[str], question: dict = QUESTION, question_key: str = "queue") -> BatchResult:
         start = perf_counter()
         decisions = []
         for report in reports:
             response = self.client.post(
                 self.base_url + "/v1/systemone",
-                json={"state": {"report": report}, "questions": {"queue": QUESTION}, "model": "english"},
+                json={"state": {"report": report}, "questions": {question_key: question}, "model": "english"},
             )
             response.raise_for_status()
-            decisions.append(Decision.from_response(response.json()))
+            decisions.append(Decision.from_response(response.json(), question, question_key))
         return BatchResult(decisions, perf_counter() - start, "remote sequential HTTP", len(reports))
 
 
+class BatchHttpLayaGateway(RemoteLayaGateway):
+    """Custom resident batch adapter, separate from laya-serve's single-state API."""
+
+    def predict_batch(self, reports: list[str], question: dict = QUESTION, question_key: str = "queue") -> BatchResult:
+        if not reports:
+            return BatchResult([], 0, "remote batched HTTP", 0)
+        start = perf_counter()
+        response = self.client.post(
+            self.base_url + "/v1/batch",
+            json={"reports": reports, "question": question, "question_key": question_key},
+        )
+        response.raise_for_status()
+        decisions = [Decision(**item) for item in response.json()["decisions"]]
+        if len(decisions) != len(reports) or any(d.choice not in question["criteria"] for d in decisions):
+            raise ValueError("Batch adapter returned invalid decisions")
+        return BatchResult(
+            decisions,
+            perf_counter() - start,
+            "remote batched HTTP",
+            1,
+        )
+
+
 def make_gateway() -> LayaGateway:
+    batch_url = os.getenv("LAYA_BATCH_BASE_URL", "").strip()
+    if batch_url:
+        return BatchHttpLayaGateway(batch_url, os.getenv("LAYA_API_KEY"))
     base_url = os.getenv("LAYA_BASE_URL", "").strip()
     if base_url:
         return RemoteLayaGateway(base_url, os.getenv("LAYA_API_KEY"))

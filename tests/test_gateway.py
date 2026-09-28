@@ -1,7 +1,7 @@
 import httpx
 import pytest
 
-from demo.laya_gateway import Decision, RemoteLayaGateway
+from demo.laya_gateway import BatchHttpLayaGateway, Decision, RemoteLayaGateway, make_gateway
 
 
 def test_confidence_is_chosen_probability_not_entropy_score():
@@ -35,3 +35,9 @@ def test_remote_gateway_calls_one_request_per_report():
 def test_invalid_remote_url_is_rejected():
     with pytest.raises(ValueError):
         RemoteLayaGateway("laya.example")
+
+
+def test_batch_url_takes_precedence_over_stock_laya_serve(monkeypatch):
+    monkeypatch.setenv("LAYA_BATCH_BASE_URL", "https://batch.example")
+    monkeypatch.setenv("LAYA_BASE_URL", "https://single.example")
+    assert isinstance(make_gateway(), BatchHttpLayaGateway)
