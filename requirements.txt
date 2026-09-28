@@ -1,0 +1,8 @@
+laya==0.3.21
+langchain==1.4.2
+langchain-openai==1.6.6
+langgraph==1.2.12
+streamlit==1.64.0
+python-dotenv==1.2.3
+httpx==0.28.1
+pytest==9.1.1
